@@ -1,0 +1,8 @@
+.excalidraw-live-status.is-live {
+	color: var(--color-green);
+}
+
+.excalidraw-live-modal .excalidraw-live-hint {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
