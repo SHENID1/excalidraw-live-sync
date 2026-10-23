@@ -68,12 +68,12 @@ export const ru: Record<TextKey, string> = {
 	openFailed: "не удалось открыть рисунок в режиме Excalidraw",
 	noApi: "Excalidraw API недоступен",
 
-	anonymous: "Аноним",
 	setName: "Имя",
 	setNameDesc: "Так тебя увидят другие участники рядом с курсором.",
 	setColor: "Цвет курсора",
 	setPort: "Порт",
 	setPortDesc: "TCP-порт, который открывает хост. У подключающихся должен совпадать (или указывай адрес:порт).",
+	setPortInvalid: "Укажи порт от 1 до 65535",
 	setPassword: "Пароль сессии (когда ты хост)",
 	setPasswordOn:
 		"Задан. Хранится только хэш (scrypt), сам пароль не показать — можно задать новый или убрать. " +

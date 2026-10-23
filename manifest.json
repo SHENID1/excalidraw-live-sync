@@ -1,7 +1,7 @@
 {
   "id": "excalidraw-live-sync",
   "name": "Excalidraw Live Sync",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "minAppVersion": "1.8.7",
   "description": "Co-edit Excalidraw drawings in real time with live cursors over a LAN or a virtual LAN such as Radmin VPN, Hamachi, ZeroTier or Tailscale.",
   "author": "SHENID",

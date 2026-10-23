@@ -25,6 +25,9 @@ This plugin talks to the network — that is its whole purpose. To be explicit:
   of the drawing that is being shared. No other vault content is sent.
 - There are no third-party services, accounts, telemetry or analytics. Nothing leaves your machine
   unless you start or join a session.
+- The host window lists your computer's network interfaces (`os.networkInterfaces()`) only to show which
+  addresses participants can use; they are not sent anywhere. Its “Copy” button writes the chosen address
+  to the clipboard; the plugin never reads the clipboard.
 - Without a session password, traffic is not encrypted. Set a password when the network is shared with
   people you don't trust (for example, a public Hamachi network) — see below.
 
@@ -73,6 +76,7 @@ The interface follows Obsidian's language: Russian when Obsidian is set to Russi
 ## Settings
 
 Cursor name and color, port (default `47321`), session password, folder for new drawings.
+A fresh install starts with a random name like “Guest 4821” — change it in the settings or in the join dialog.
 
 ## Password and encryption
 
@@ -105,11 +109,11 @@ Without a password anyone on the network can join, and traffic is not encrypted.
 Bump `version` in `manifest.json` and `package.json`, commit, and push a tag with the same number:
 
 ```bash
-git tag 0.3.1
-git push origin 0.3.1
+git tag 0.3.2
+git push origin 0.3.2
 ```
 
-A GitHub Action builds the plugin and publishes a release with `main.js`, `manifest.json` and `styles.css`.
+A GitHub Action builds the plugin, attests the build provenance and publishes a release with `main.js`, `manifest.json` and `styles.css`.
 
 ## Limitations
 

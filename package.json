@@ -1,6 +1,6 @@
 {
   "name": "excalidraw-live-sync",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Live collaboration for the Obsidian Excalidraw plugin over LAN / virtual LAN (Radmin VPN, Hamachi, ZeroTier, ...)",
   "main": "main.js",
   "private": true,

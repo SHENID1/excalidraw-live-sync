@@ -81,10 +81,9 @@ export default class ExcalidrawLivePlugin extends Plugin {
 		type Stored = Partial<LiveSettings> & { password?: string; joinPassword?: string };
 		const { password, joinPassword, ...data } = ((await this.loadData()) ?? {}) as Stored;
 		this.settings = { ...DEFAULT_SETTINGS, ...data, joinKeys: { ...data.joinKeys } };
-		if (password !== undefined || joinPassword !== undefined) {
-			if (password) this.settings.hostKey = await derivePasswordKey(password);
-			await this.saveSettings();
-		}
+		if (password) this.settings.hostKey = await derivePasswordKey(password);
+		// Also pin the random default name and color, or every restart would roll new ones.
+		if (password !== undefined || joinPassword !== undefined || !data.name || !data.color) await this.saveSettings();
 	}
 
 	async saveSettings(): Promise<void> {

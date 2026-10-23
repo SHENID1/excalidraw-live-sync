@@ -68,12 +68,12 @@ export const en = {
 	openFailed: "Couldn't open the drawing in Excalidraw view",
 	noApi: "The Excalidraw API is unavailable",
 
-	anonymous: "Anonymous",
 	setName: "Name",
-	setNameDesc: "How other participants see you next to your cursor.",
+	setNameDesc: "Shown to other participants next to your pointer.",
 	setColor: "Cursor color",
 	setPort: "Port",
 	setPortDesc: "TCP port the host listens on. Participants use the same one, or enter address:port.",
+	setPortInvalid: "Enter a port from 1 to 65535",
 	setPassword: "Session password (when hosting)",
 	setPasswordOn:
 		"Set. Only a scrypt hash is stored, so it can't be shown — set a new one or remove it. " +
@@ -92,8 +92,7 @@ export const en = {
 	setFolderDesc: "Where drawings created when joining someone else's session are saved.",
 
 	hostTitle: "Session started",
-	hostIntro:
-		"Send participants one of these addresses — the one on a network you share with them (Radmin VPN, Hamachi, LAN, etc.).",
+	hostIntro: "Send participants the address on a network you share with them, such as a local or virtual network.",
 	hostNoInterfaces: "No IPv4 network interfaces found.",
 	copy: "Copy",
 	copied: "Copied: {text}",
