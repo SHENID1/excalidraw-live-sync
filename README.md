@@ -1,98 +1,123 @@
 # Excalidraw Live Sync
 
-Live-режим для плагина [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) в Obsidian:
-несколько человек рисуют на одной доске в реальном времени и видят курсоры (и лазерную указку) друг друга.
+[Русская версия](README.ru.md)
 
-Сервера нет: один из участников — **хост**, остальные подключаются к нему напрямую по TCP.
-Подойдёт любая сеть, где участники видят IP друг друга:
+Live collaboration for the [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) plugin in Obsidian:
+several people draw on the same board in real time and see each other's cursors and laser pointer.
 
-- обычная локалка / Wi‑Fi;
-- Radmin VPN (адреса `26.x.x.x`), Hamachi (`25.x.x.x`), ZeroTier, Tailscale;
-- любой туннель, который пробрасывает TCP‑порт хоста.
+There is no server: one participant **hosts**, the others connect to them directly over TCP.
+Any network where participants can reach each other's IP works:
 
-Только десктоп (на мобильном Obsidian нет сетевого API Node.js).
+- a regular LAN or Wi‑Fi;
+- Radmin VPN (`26.x.x.x` addresses), Hamachi (`25.x.x.x`), ZeroTier, Tailscale;
+- any tunnel that forwards the host's TCP port.
 
-## Установка
+Desktop only: mobile Obsidian has no Node.js networking API.
 
-Ставить нужно всем участникам, версии этого плагина должны совпадать. Плагин Excalidraw должен быть включён.
+## Network use
 
-**Через BRAT (рекомендуется — обновления приходят сами)**
-1. *Настройки → Сторонние плагины → Обзор* → найти и установить **BRAT**, включить.
-2. *BRAT → Add Beta plugin* → ввести `SHENID1/excalidraw-live-sync`.
-3. Включить **Excalidraw Live Sync** в списке сторонних плагинов.
+This plugin talks to the network — that is its whole purpose. To be explicit:
 
-**Вручную**
-Скачать `main.js`, `manifest.json`, `styles.css` из [последнего релиза](https://github.com/SHENID1/excalidraw-live-sync/releases/latest)
-в папку `<хранилище>/.obsidian/plugins/excalidraw-live-sync/`, затем включить плагин.
+- **When you host**, it opens a TCP server on the port from the settings (`47321` by default) on all network
+  interfaces of your computer, so participants on your LAN or VPN can connect.
+- **When you join**, it opens a TCP connection to the address you enter.
+- Only the participants of a session exchange data: drawing elements, embedded images and cursor positions
+  of the drawing that is being shared. No other vault content is sent.
+- There are no third-party services, accounts, telemetry or analytics. Nothing leaves your machine
+  unless you start or join a session.
+- Without a session password, traffic is not encrypted. Set a password when the network is shared with
+  people you don't trust (for example, a public Hamachi network) — see below.
 
-**Из исходников**
+## Installation
+
+Everyone in a session needs the plugin, and the versions must match. The Excalidraw plugin must be enabled.
+
+**With BRAT** (updates arrive automatically)
+1. *Settings → Community plugins → Browse* → install and enable **BRAT**.
+2. *BRAT → Add Beta plugin* → enter `SHENID1/excalidraw-live-sync`.
+3. Enable **Excalidraw Live Sync** in the list of community plugins.
+
+**Manually**
+Download `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/SHENID1/excalidraw-live-sync/releases/latest)
+into `<vault>/.obsidian/plugins/excalidraw-live-sync/`, then enable the plugin.
+
+**From source**
 
 ```bash
 npm install
 npm run build
-npm run install-plugin -- "C:/путь/к/хранилищу"
+npm run install-plugin -- "C:/path/to/vault"
 ```
 
-## Выпуск новой версии
+## Usage
 
-Поднять `version` в `manifest.json` и `package.json`, закоммитить и запушить тег с тем же номером:
+**Host**
+1. Open an Excalidraw drawing.
+2. Command palette → “Start live session (host)” (or the radio tower icon in the ribbon, or click `Live: off` in the status bar).
+3. A window lists your addresses — send participants the one on a network you share with them (for example, Radmin VPN).
+4. If Windows asks about the firewall, allow Obsidian on private networks.
+
+**Participant**
+1. “Join live session”, enter `IP` or `IP:port`, your name and the password (if the host set one).
+2. Choose where to join:
+   - *New drawing* — a file is created in the `Excalidraw Live` folder (configurable);
+   - *Current drawing (replace its contents)* — the open drawing is replaced with the host's;
+   - *Current drawing (merge with the host's)* — your elements are added to the host's board.
+
+Everyone works on their own copy of the file in their own vault; Excalidraw autosaves the changes.
+The session ends when you close the drawing tab or open another file in it.
+After disconnecting, each participant keeps their copy as a regular local file.
+
+The interface follows Obsidian's language: Russian when Obsidian is set to Russian, English otherwise.
+
+## Settings
+
+Cursor name and color, port (default `47321`), session password, folder for new drawings.
+
+## Password and encryption
+
+When the host sets a password:
+
+- the settings store a key derived from it (`scrypt` with a random salt), not the password itself;
+- the password never goes over the network: the host sends the salt and a one-time nonce,
+  the participant answers with an HMAC of it, and the host proves the password back the same way;
+  a captured answer is useless for the next connection;
+- after that, all traffic (drawing, images, cursors) is encrypted with AES-256-GCM using fresh keys per connection;
+- participants remember the key for the host's address, so the password is typed once;
+- if a participant entered a password but the host doesn't ask for one, the connection is refused
+  rather than silently falling back to plaintext.
+
+Without a password anyone on the network can join, and traffic is not encrypted.
+
+## How it works
+
+- `src/net.ts` — TCP server and client: a JSON-lines handshake, then length-prefixed frames
+  (encrypted when a password is set) with keepalive. The host relays clients' messages to everyone else.
+- `src/crypto.ts` — the password key, password proofs and frame encryption.
+- `src/session.ts` — binds to the open `ExcalidrawView`: wraps its `onChange` / `onPointerUpdate`,
+  sends changed elements and merges incoming ones by Excalidraw's own rule
+  (higher `version` wins, ties go to the lower `versionNonce`), so all scenes converge.
+  Remote changes don't enter the undo history.
+- Images (`files`) are sent whole; cursors are shown through Excalidraw's `collaborators`.
+
+## Releasing
+
+Bump `version` in `manifest.json` and `package.json`, commit, and push a tag with the same number:
 
 ```bash
-git tag 0.2.1
-git push origin 0.2.1
+git tag 0.3.1
+git push origin 0.3.1
 ```
 
-GitHub Action соберёт плагин и выложит релиз с `main.js`, `manifest.json`, `styles.css`.
+A GitHub Action builds the plugin and publishes a release with `main.js`, `manifest.json` and `styles.css`.
 
-## Как пользоваться
+## Limitations
 
-**Хост**
-1. Открой рисунок Excalidraw.
-2. Палитра команд → «Начать live-сессию (стать хостом)» (или иконка радиовышки слева / клик по `Live: выкл` в статус-баре).
-3. Появится окно с адресами — скинь участникам тот, что из общей с ними сети (например, Radmin VPN).
-4. Если Windows спросит про брандмауэр — разреши Obsidian доступ к частным сетям.
+- Without a password, traffic is not encrypted.
+- Plugin versions 0.1 and 0.2+ can't connect to each other — update everyone.
+- If the host disconnects, the session ends for everyone; reconnecting is manual.
+- Embedded links to vault files (`[[...]]`, embeddables) open for other participants only if they have those files too.
 
-**Участник**
-1. «Подключиться к live-сессии», ввести `IP` или `IP:порт` и пароль (если задан).
-2. Выбрать, куда подключаться:
-   - *Новый рисунок* — создаётся файл в папке `Excalidraw Live` (настраивается);
-   - *Текущий рисунок (заменить)* — содержимое открытого рисунка заменяется рисунком хоста;
-   - *Текущий рисунок (объединить)* — твои элементы добавляются к доске хоста.
+## License
 
-Каждый работает со своей копией файла в своём хранилище; Excalidraw сам автосохраняет изменения.
-Сессия завершается, если закрыть вкладку с рисунком или открыть в ней другой файл.
-
-## Настройки
-
-Имя и цвет курсора, порт (по умолчанию `47321`), пароль сессии, папка для новых рисунков.
-
-## Пароль и шифрование
-
-Если хост задал пароль:
-
-- в настройках хранится не пароль, а ключ из него (`scrypt` со случайной солью) — прочитать пароль из файла настроек нельзя;
-- по сети пароль не передаётся: хост присылает соль и одноразовое число, участник отвечает HMAC от него;
-  перехваченный ответ для следующего подключения не годится;
-- после входа весь трафик (рисунок, картинки, курсоры) шифруется AES-256-GCM, отдельными ключами на каждое соединение;
-- участник запоминает ключ для адреса хоста, так что пароль вводится один раз;
-- если участник ввёл пароль, а хост его не требует, подключение отклоняется — без шифрования молча не работаем.
-
-Без пароля всё как раньше: подключиться может любой в сети, трафик не шифруется.
-
-## Как это устроено
-
-- `src/net.ts` — TCP-сервер/клиент: рукопожатие JSON-строками, дальше кадры с длиной (зашифрованные, если задан пароль), keepalive.
-  Хост пересылает сообщения клиентов остальным.
-- `src/crypto.ts` — ключ из пароля, подтверждение пароля и шифрование кадров.
-- `src/session.ts` — привязка к открытому `ExcalidrawView`: перехватывает его `onChange`/`onPointerUpdate`,
-  рассылает изменённые элементы и сливает входящие по правилу самого Excalidraw
-  (побеждает бо́льший `version`, при равенстве — меньший `versionNonce`), так что все сцены сходятся.
-  Удалённые изменения не попадают в историю undo.
-- Картинки (`files`) передаются целиком, курсоры — через `collaborators` Excalidraw.
-
-## Ограничения
-
-- Без пароля трафик не шифруется — задай пароль, если сеть общая (например, публичная сеть Hamachi).
-- Участники с версией плагина 0.1 и 0.2+ друг к другу не подключатся — обновите у всех.
-- Если хост отключился, сессия заканчивается у всех; переподключение — вручную.
-- Встраиваемые ссылки на файлы хранилища (`[[...]]`, embeddable) у других участников откроются, только если такие файлы есть и у них.
+[MIT](LICENSE)

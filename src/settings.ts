@@ -1,6 +1,7 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import * as os from "os";
 import { derivePasswordKey, PasswordKey } from "./crypto";
+import { t } from "./i18n";
 import type ExcalidrawLivePlugin from "./main";
 import type { JoinMode } from "./session";
 
@@ -32,9 +33,9 @@ export const DEFAULT_SETTINGS: LiveSettings = {
 
 function safeUsername(): string {
 	try {
-		return os.userInfo().username || "Аноним";
+		return os.userInfo().username || t("anonymous");
 	} catch {
-		return "Аноним";
+		return t("anonymous");
 	}
 }
 
@@ -52,16 +53,16 @@ export class LiveSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName("Имя")
-			.setDesc("Так тебя увидят другие участники рядом с курсором.")
-			.addText((t) =>
-				t.setValue(s.name).onChange(async (v) => {
+			.setName(t("setName"))
+			.setDesc(t("setNameDesc"))
+			.addText((text) =>
+				text.setValue(s.name).onChange(async (v) => {
 					s.name = v.trim() || DEFAULT_SETTINGS.name;
 					await this.plugin.saveSettings();
 				}),
 			);
 
-		new Setting(containerEl).setName("Цвет курсора").addColorPicker((c) =>
+		new Setting(containerEl).setName(t("setColor")).addColorPicker((c) =>
 			c.setValue(s.color).onChange(async (v) => {
 				s.color = v;
 				await this.plugin.saveSettings();
@@ -69,10 +70,10 @@ export class LiveSettingTab extends PluginSettingTab {
 		);
 
 		new Setting(containerEl)
-			.setName("Порт")
-			.setDesc("TCP-порт, который открывает хост. У подключающихся должен совпадать (или указывай адрес:порт).")
-			.addText((t) =>
-				t.setValue(String(s.port)).onChange(async (v) => {
+			.setName(t("setPort"))
+			.setDesc(t("setPortDesc"))
+			.addText((text) =>
+				text.setValue(String(s.port)).onChange(async (v) => {
 					const port = Number(v);
 					if (Number.isInteger(port) && port > 0 && port < 65536) {
 						s.port = port;
@@ -84,48 +85,42 @@ export class LiveSettingTab extends PluginSettingTab {
 		let newPassword = "";
 		const setPassword = async () => {
 			if (!newPassword) {
-				new Notice("Введи пароль");
+				new Notice(t("pwEnter"));
 				return;
 			}
 			s.hostKey = await derivePasswordKey(newPassword);
 			await this.plugin.saveSettings();
-			new Notice("Пароль сессии задан");
+			new Notice(t("pwSet"));
 			this.display();
 		};
 		new Setting(containerEl)
-			.setName("Пароль сессии (когда ты хост)")
-			.setDesc(
-				s.hostKey
-					? "Задан. Хранится только хэш (scrypt), сам пароль не показать — можно задать новый или убрать. " +
-							"Пароль по сети не передаётся, весь трафик шифруется."
-					: "Не задан — подключиться может любой в сети, трафик не шифруется. " +
-							"С паролем участники входят только по нему, а весь трафик шифруется.",
-			)
-			.addText((t) => {
-				t.inputEl.type = "password";
-				t.setPlaceholder(s.hostKey ? "Новый пароль" : "Пароль").onChange((v) => (newPassword = v));
-				t.inputEl.addEventListener("keydown", (e) => {
+			.setName(t("setPassword"))
+			.setDesc(s.hostKey ? t("setPasswordOn") : t("setPasswordOff"))
+			.addText((text) => {
+				text.inputEl.type = "password";
+				text.setPlaceholder(s.hostKey ? t("pwNewPlaceholder") : t("pwPlaceholder")).onChange((v) => (newPassword = v));
+				text.inputEl.addEventListener("keydown", (e) => {
 					if (e.key === "Enter") void setPassword();
 				});
 			})
-			.addButton((b) => b.setButtonText("Задать").onClick(() => void setPassword()))
+			.addButton((b) => b.setButtonText(t("pwSetButton")).onClick(() => void setPassword()))
 			.addButton((b) =>
 				b
-					.setButtonText("Убрать")
+					.setButtonText(t("pwRemoveButton"))
 					.setDisabled(!s.hostKey)
 					.onClick(async () => {
 						s.hostKey = null;
 						await this.plugin.saveSettings();
-						new Notice("Пароль сессии убран");
+						new Notice(t("pwRemoved"));
 						this.display();
 					}),
 			);
 
 		new Setting(containerEl)
-			.setName("Папка для новых рисунков")
-			.setDesc("Куда сохранять рисунки, созданные при подключении к чужой сессии.")
-			.addText((t) =>
-				t.setValue(s.folder).onChange(async (v) => {
+			.setName(t("setFolder"))
+			.setDesc(t("setFolderDesc"))
+			.addText((text) =>
+				text.setValue(s.folder).onChange(async (v) => {
 					s.folder = v.trim();
 					await this.plugin.saveSettings();
 				}),

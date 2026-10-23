@@ -1,5 +1,6 @@
 import { App, Modal, Notice, Setting } from "obsidian";
 import { localAddresses } from "./net";
+import { t } from "./i18n";
 import type { JoinMode } from "./session";
 
 export class HostInfoModal extends Modal {
@@ -13,34 +14,30 @@ export class HostInfoModal extends Modal {
 
 	onOpen(): void {
 		const { contentEl } = this;
-		this.titleEl.setText("Сессия запущена");
+		this.titleEl.setText(t("hostTitle"));
 		contentEl.addClass("excalidraw-live-modal");
 		contentEl.createEl("p", {
-			text: "Отправь участникам один из адресов — тот, что из общей с ними сети (Radmin VPN, Hamachi, локалка и т.д.).",
+			text: t("hostIntro"),
 		});
 
 		const addrs = localAddresses();
-		if (!addrs.length) contentEl.createEl("p", { text: "Не найдено ни одного сетевого интерфейса IPv4." });
+		if (!addrs.length) contentEl.createEl("p", { text: t("hostNoInterfaces") });
 		for (const a of addrs) {
 			const full = `${a.address}:${this.port}`;
 			new Setting(contentEl)
 				.setName(full)
 				.setDesc(a.label)
 				.addButton((b) =>
-					b.setButtonText("Копировать").onClick(async () => {
+					b.setButtonText(t("copy")).onClick(async () => {
 						await navigator.clipboard.writeText(full);
-						new Notice(`Скопировано: ${full}`);
+						new Notice(t("copied", { text: full }));
 					}),
 				);
 		}
 
 		contentEl.createEl("p", {
 			cls: "excalidraw-live-hint",
-			text:
-				"Если Windows спросит про брандмауэр — разреши Obsidian доступ к частным сетям. " +
-				(this.hasPassword
-					? "Не забудь сообщить пароль. Трафик сессии шифруется."
-					: "Пароль не задан — подключиться может любой в этой сети, трафик не шифруется."),
+			text: `${t("hostFirewall")} ${this.hasPassword ? t("hostHintPassword") : t("hostHintOpen")}`,
 		});
 	}
 
@@ -74,58 +71,58 @@ export class JoinModal extends Modal {
 
 	onOpen(): void {
 		const { contentEl } = this;
-		this.titleEl.setText("Подключиться к live-сессии");
+		this.titleEl.setText(t("joinTitle"));
 		contentEl.addClass("excalidraw-live-modal");
 
 		new Setting(contentEl)
-			.setName("Адрес хоста")
-			.setDesc("IP или IP:порт, например 26.15.3.7:47321")
-			.addText((t) => {
-				t.setPlaceholder("26.15.3.7:47321").setValue(this.req.address);
-				t.onChange((v) => {
+			.setName(t("joinAddress"))
+			.setDesc(t("joinAddressDesc"))
+			.addText((text) => {
+				text.setPlaceholder("26.15.3.7:47321").setValue(this.req.address);
+				text.onChange((v) => {
 					this.req.address = v;
 					this.describePassword();
 				});
-				t.inputEl.addEventListener("keydown", (e) => {
+				text.inputEl.addEventListener("keydown", (e) => {
 					if (e.key === "Enter") this.submit();
 				});
-				window.setTimeout(() => t.inputEl.focus(), 0);
+				window.setTimeout(() => text.inputEl.focus(), 0);
 			});
 
 		new Setting(contentEl)
-			.setName("Твоё имя")
-			.setDesc("Так тебя увидят другие участники рядом с курсором.")
-			.addText((t) => t.setValue(this.req.name).onChange((v) => (this.req.name = v)));
+			.setName(t("joinName"))
+			.setDesc(t("setNameDesc"))
+			.addText((text) => text.setValue(this.req.name).onChange((v) => (this.req.name = v)));
 
-		this.passwordSetting = new Setting(contentEl).setName("Пароль").addText((t) => {
-			t.inputEl.type = "password";
-			t.setValue(this.req.password).onChange((v) => (this.req.password = v));
+		this.passwordSetting = new Setting(contentEl).setName(t("joinPassword")).addText((text) => {
+			text.inputEl.type = "password";
+			text.setValue(this.req.password).onChange((v) => (this.req.password = v));
 		});
 		this.describePassword();
 
-		new Setting(contentEl).setName("Куда").addDropdown((d) => {
-			d.addOption("new", "Новый рисунок");
+		new Setting(contentEl).setName(t("joinTarget")).addDropdown((d) => {
+			d.addOption("new", t("joinNew"));
 			if (this.hasActiveDrawing) {
-				d.addOption("replace", "Текущий рисунок (заменить содержимое)");
-				d.addOption("merge", "Текущий рисунок (объединить с хостом)");
+				d.addOption("replace", t("joinReplace"));
+				d.addOption("merge", t("joinMerge"));
 			}
 			d.setValue(this.req.mode).onChange((v) => (this.req.mode = v as JoinMode));
 		});
 
-		new Setting(contentEl).addButton((b) => b.setButtonText("Подключиться").setCta().onClick(() => this.submit()));
+		new Setting(contentEl).addButton((b) => b.setButtonText(t("joinButton")).setCta().onClick(() => this.submit()));
 	}
 
 	private describePassword(): void {
 		this.passwordSetting?.setDesc(
 			this.hasSavedKey(this.req.address)
-				? "Для этого адреса уже сохранён — можно оставить пустым."
-				: "Только если хост его задал, иначе оставь пустым.",
+				? t("joinPasswordSaved")
+				: t("joinPasswordHint"),
 		);
 	}
 
 	private submit(): void {
 		if (!this.req.address.trim()) {
-			new Notice("Укажи адрес хоста");
+			new Notice(t("joinNeedAddress"));
 			return;
 		}
 		this.close();

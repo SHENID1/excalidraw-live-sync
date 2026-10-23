@@ -12,7 +12,6 @@
 export const PROTOCOL_VERSION = 2;
 export const HOST_ID = "host";
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 export type SceneElement = {
 	id: string;
 	version: number;
@@ -20,7 +19,7 @@ export type SceneElement = {
 	isDeleted?: boolean;
 	index?: string | null;
 	fileId?: string | null;
-	[key: string]: any;
+	[key: string]: unknown;
 };
 
 export type BinaryFile = {
@@ -28,9 +27,8 @@ export type BinaryFile = {
 	mimeType: string;
 	dataURL: string;
 	created: number;
-	[key: string]: any;
+	[key: string]: unknown;
 };
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 export interface PeerInfo {
 	id: string;

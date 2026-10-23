@@ -7,6 +7,7 @@ import {
 	waitForViewReady,
 } from "./excalidraw";
 import { derivePasswordKey } from "./crypto";
+import { reasonText, t } from "./i18n";
 import { Connected, LiveClient, LiveHost, parseAddress } from "./net";
 import { HOST_ID, PeerInfo } from "./protocol";
 import { LiveSession, SessionCallbacks } from "./session";
@@ -28,13 +29,13 @@ export default class ExcalidrawLivePlugin extends Plugin {
 		this.statusEl.addEventListener("click", (e) => this.showMenu(e));
 		this.refreshStatus();
 
-		this.addRibbonIcon("radio-tower", "Excalidraw Live", (e) => this.showMenu(e));
+		this.addRibbonIcon("radio-tower", t("ribbon"), (e) => this.showMenu(e));
 
-		this.addCommand({ id: "host", name: "Начать live-сессию (стать хостом)", callback: () => this.startHost() });
-		this.addCommand({ id: "join", name: "Подключиться к live-сессии", callback: () => this.openJoin() });
+		this.addCommand({ id: "host", name: t("cmdHost"), callback: () => this.startHost() });
+		this.addCommand({ id: "join", name: t("cmdJoin"), callback: () => this.openJoin() });
 		this.addCommand({
 			id: "show-addresses",
-			name: "Показать адреса для подключения",
+			name: t("cmdShowAddresses"),
 			checkCallback: (checking) => {
 				if (this.session?.role !== "host") return false;
 				if (!checking) this.showHostInfo();
@@ -43,7 +44,7 @@ export default class ExcalidrawLivePlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "resync",
-			name: "Пересинхронизировать рисунок",
+			name: t("cmdResync"),
 			checkCallback: (checking) => {
 				if (!this.session) return false;
 				if (!checking) this.session.resync();
@@ -52,10 +53,10 @@ export default class ExcalidrawLivePlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "stop",
-			name: "Завершить live-сессию",
+			name: t("cmdStop"),
 			checkCallback: (checking) => {
 				if (!this.session) return false;
-				if (!checking) this.session.end("остановлено вручную");
+				if (!checking) this.session.end("endStopped");
 				return true;
 			},
 		});
@@ -64,27 +65,24 @@ export default class ExcalidrawLivePlugin extends Plugin {
 		const checkView = () => {
 			const s = this.session;
 			if (!s?.view) return;
-			if (!isViewOpen(this.app, s.view)) s.end("вкладка с рисунком закрыта");
-			else if (!s.isBoundTo(s.view)) s.end("во вкладке открыт другой рисунок");
+			if (!isViewOpen(this.app, s.view)) s.end("endTabClosed");
+			else if (!s.isBoundTo(s.view)) s.end("endOtherDrawing");
 		};
 		this.registerEvent(this.app.workspace.on("layout-change", checkView));
 		this.registerEvent(this.app.workspace.on("file-open", checkView));
 	}
 
 	onunload(): void {
-		this.session?.end("плагин выгружен");
+		this.session?.end("endUnloaded");
 	}
 
 	async loadSettings(): Promise<void> {
-		const data = (await this.loadData()) ?? {};
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, data, { joinKeys: { ...data.joinKeys } });
-
 		// Up to 0.1 passwords were stored as typed; keep only the host one, as its scrypt key.
-		if ("password" in data || "joinPassword" in data) {
-			const legacy = this.settings as LiveSettings & { password?: string; joinPassword?: string };
-			if (legacy.password) legacy.hostKey = await derivePasswordKey(legacy.password);
-			delete legacy.password;
-			delete legacy.joinPassword;
+		type Stored = Partial<LiveSettings> & { password?: string; joinPassword?: string };
+		const { password, joinPassword, ...data } = ((await this.loadData()) ?? {}) as Stored;
+		this.settings = { ...DEFAULT_SETTINGS, ...data, joinKeys: { ...data.joinKeys } };
+		if (password !== undefined || joinPassword !== undefined) {
+			if (password) this.settings.hostKey = await derivePasswordKey(password);
 			await this.saveSettings();
 		}
 	}
@@ -100,12 +98,12 @@ export default class ExcalidrawLivePlugin extends Plugin {
 	private callbacksFor(getSession: () => LiveSession | null): SessionCallbacks {
 		return {
 			onPeersChanged: () => this.refreshStatus(),
-			onPeerJoined: (p) => new Notice(`Excalidraw Live: ${p.name} подключился`),
-			onPeerLeft: (p) => new Notice(`Excalidraw Live: ${p.name} отключился`),
+			onPeerJoined: (p) => new Notice(t("peerJoined", { name: p.name })),
+			onPeerLeft: (p) => new Notice(t("peerLeft", { name: p.name })),
 			onEnded: (reason) => {
 				if (this.session === getSession()) {
 					this.session = null;
-					new Notice(`Excalidraw Live: сессия завершена — ${reason}`);
+					new Notice(t("sessionEnded", { reason: reasonText(reason) }));
 				}
 				this.refreshStatus();
 			},
@@ -114,11 +112,11 @@ export default class ExcalidrawLivePlugin extends Plugin {
 
 	private ensureIdle(): boolean {
 		if (this.session) {
-			new Notice("Сессия уже идёт — сначала заверши её");
+			new Notice(t("alreadyRunning"));
 			return false;
 		}
 		if (!isExcalidrawPluginEnabled(this.app)) {
-			new Notice("Нужен включённый плагин Excalidraw");
+			new Notice(t("needExcalidraw"));
 			return false;
 		}
 		return true;
@@ -128,7 +126,7 @@ export default class ExcalidrawLivePlugin extends Plugin {
 		if (!this.ensureIdle()) return;
 		const view = getActiveExcalidrawView(this.app);
 		if (!view) {
-			new Notice("Открой рисунок Excalidraw, которым хочешь поделиться");
+			new Notice(t("openDrawingToShare"));
 			return;
 		}
 		let session: LiveSession | null = null;
@@ -154,7 +152,7 @@ export default class ExcalidrawLivePlugin extends Plugin {
 			this.refreshStatus();
 			this.showHostInfo();
 		} catch (e) {
-			new Notice(`Не удалось запустить сессию: ${errorText(e)}`);
+			new Notice(t("hostFailed", { error: errorText(e) }));
 		}
 	}
 
@@ -182,19 +180,19 @@ export default class ExcalidrawLivePlugin extends Plugin {
 
 		const addr = parseAddress(req.address, this.settings.port);
 		if (!addr) {
-			new Notice("Некорректный адрес. Формат: 26.15.3.7 или 26.15.3.7:47321");
+			new Notice(t("badAddress"));
 			return;
 		}
 
 		let view = req.mode === "new" ? null : getActiveExcalidrawView(this.app);
 		if (req.mode !== "new" && !view) {
-			new Notice("Нет открытого рисунка Excalidraw");
+			new Notice(t("noOpenDrawing"));
 			return;
 		}
 
 		let session: LiveSession | null = null;
 		const s = (session = new LiveSession("client", this.callbacksFor(() => session)));
-		const connecting = new Notice(`Подключаюсь к ${addr.host}:${addr.port}…`, 0);
+		const connecting = new Notice(t("connecting", { address: addressKey(addr) }), 0);
 		const savedKey = this.settings.joinKeys[addressKey(addr)] ?? null;
 		let res: Connected;
 		try {
@@ -202,7 +200,7 @@ export default class ExcalidrawLivePlugin extends Plugin {
 			s.transport = res.client;
 		} catch (e) {
 			connecting.hide();
-			new Notice(`Не удалось подключиться: ${errorText(e)}`);
+			new Notice(t("joinFailed", { error: errorText(e) }));
 			return;
 		}
 		connecting.hide();
@@ -224,8 +222,8 @@ export default class ExcalidrawLivePlugin extends Plugin {
 			if (this.session !== s) return; // disconnected while the drawing was opening
 			s.attach(view);
 			s.applyWelcome(welcome, req.mode);
-			const lock = res.client.encrypted ? ", зашифровано" : "";
-			new Notice(`Подключено к «${welcome.drawing || this.hostLabel}» (${this.hostLabel}${lock})`);
+			const vars = { drawing: welcome.drawing || this.hostLabel, host: this.hostLabel };
+			new Notice(t(res.client.encrypted ? "connectedEncrypted" : "connected", vars));
 		} catch (e) {
 			s.end(errorText(e));
 		}
@@ -239,26 +237,26 @@ export default class ExcalidrawLivePlugin extends Plugin {
 		const menu = new Menu();
 		const s = this.session;
 		if (!s) {
-			menu.addItem((i) => i.setTitle("Начать сессию (хост)").setIcon("radio-tower").onClick(() => this.startHost()));
-			menu.addItem((i) => i.setTitle("Подключиться…").setIcon("plug").onClick(() => this.openJoin()));
+			menu.addItem((i) => i.setTitle(t("menuHost")).setIcon("radio-tower").onClick(() => this.startHost()));
+			menu.addItem((i) => i.setTitle(t("menuJoin")).setIcon("plug").onClick(() => this.openJoin()));
 		} else {
 			const peers = [...s.peers.values()];
 			menu.addItem((i) =>
 				i
-					.setTitle(peers.length ? `Участники: ${peers.map((p) => p.name).join(", ")}` : "Пока никого нет")
+					.setTitle(peers.length ? t("menuPeers", { names: peers.map((p) => p.name).join(", ") }) : t("menuNoPeers"))
 					.setIcon("users")
 					.setDisabled(true),
 			);
 			menu.addSeparator();
 			if (s.role === "host") {
-				menu.addItem((i) => i.setTitle("Адреса для подключения").setIcon("copy").onClick(() => this.showHostInfo()));
+				menu.addItem((i) => i.setTitle(t("menuAddresses")).setIcon("copy").onClick(() => this.showHostInfo()));
 			}
-			menu.addItem((i) => i.setTitle("Пересинхронизировать").setIcon("refresh-cw").onClick(() => s.resync()));
+			menu.addItem((i) => i.setTitle(t("menuResync")).setIcon("refresh-cw").onClick(() => s.resync()));
 			menu.addItem((i) =>
 				i
-					.setTitle(s.role === "host" ? "Завершить сессию" : "Отключиться")
+					.setTitle(s.role === "host" ? t("menuEnd") : t("menuLeave"))
 					.setIcon("power")
-					.onClick(() => s.end("остановлено вручную")),
+					.onClick(() => s.end("endStopped")),
 			);
 		}
 		menu.showAtMouseEvent(evt);
@@ -269,20 +267,20 @@ export default class ExcalidrawLivePlugin extends Plugin {
 		const s = this.session;
 		this.statusEl.toggleClass("is-live", !!s);
 		if (!s) {
-			this.statusEl.setText("Live: выкл");
-			this.statusEl.setAttr("aria-label", "Excalidraw Live — нажми, чтобы начать или подключиться");
+			this.statusEl.setText(t("statusOff"));
+			this.statusEl.setAttr("aria-label", t("statusOffTip"));
 		} else if (s.role === "host") {
-			this.statusEl.setText(`● Live: хост · ${s.peers.size}`);
-			this.statusEl.setAttr("aria-label", `Хост на порту ${this.settings.port}, участников: ${s.peers.size}`);
+			this.statusEl.setText(t("statusHost", { count: s.peers.size }));
+			this.statusEl.setAttr("aria-label", t("statusHostTip", { port: this.settings.port, count: s.peers.size }));
 		} else {
-			this.statusEl.setText(`● Live: ${this.hostLabel}`);
-			this.statusEl.setAttr("aria-label", `Подключено к ${this.hostLabel}`);
+			this.statusEl.setText(t("statusClient", { host: this.hostLabel }));
+			this.statusEl.setAttr("aria-label", t("statusClientTip", { host: this.hostLabel }));
 		}
 	}
 }
 
 function errorText(e: unknown): string {
-	return e instanceof Error ? e.message : String(e);
+	return reasonText(e instanceof Error ? e.message : String(e));
 }
 
 function addressKey(addr: { host: string; port: number }): string {

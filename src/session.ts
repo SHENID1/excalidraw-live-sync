@@ -1,11 +1,10 @@
-import { ExcalidrawAPI, ExcalidrawViewLike } from "./excalidraw";
+import { AppStateLike, ExcalidrawAPI, ExcalidrawViewLike, PointerPayload } from "./excalidraw";
+import { t } from "./i18n";
 import type { Snapshot, Transport, TransportEvents, Welcome } from "./net";
 import { BinaryFile, Message, PeerInfo, PointerState, SceneElement } from "./protocol";
 
 const FLUSH_INTERVAL = 50;
 const POINTER_INTERVAL = 40;
-
-type PointerPayload = Parameters<ExcalidrawViewLike["onPointerUpdate"]>[0];
 
 interface Viewport {
 	scrollX: number;
@@ -70,29 +69,27 @@ export class LiveSession implements TransportEvents {
 		this.view = view;
 		this.filePath = view.file?.path ?? null;
 
-		const session = this;
-		const hadOwn = {
-			onChange: Object.prototype.hasOwnProperty.call(view, "onChange"),
-			onPointerUpdate: Object.prototype.hasOwnProperty.call(view, "onPointerUpdate"),
-		};
+		// Shadow the prototype methods with own properties; unhooking restores
+		// whatever own property was there before, or removes ours.
+		const hooked = ["onChange", "onPointerUpdate"] as const;
+		const saved = hooked.map((key) => Object.getOwnPropertyDescriptor(view, key));
 		const origChange = view.onChange;
 		const origPointer = view.onPointerUpdate;
-		view.onChange = function (...args) {
-			origChange.apply(this, args);
-			session.scheduleFlush();
-			session.onLocalViewport(args[1]);
+		view.onChange = (elements, appState, files) => {
+			origChange.call(view, elements, appState, files);
+			this.scheduleFlush();
+			this.onLocalViewport(appState);
 		};
-		view.onPointerUpdate = function (payload) {
-			origPointer.call(this, payload);
-			session.onLocalPointer(payload);
+		view.onPointerUpdate = (payload) => {
+			origPointer.call(view, payload);
+			this.onLocalPointer(payload);
 		};
 		this.unhook = () => {
-			/* eslint-disable @typescript-eslint/no-explicit-any */
-			if (hadOwn.onChange) view.onChange = origChange;
-			else delete (view as any).onChange;
-			if (hadOwn.onPointerUpdate) view.onPointerUpdate = origPointer;
-			else delete (view as any).onPointerUpdate;
-			/* eslint-enable @typescript-eslint/no-explicit-any */
+			hooked.forEach((key, i) => {
+				const descriptor = saved[i];
+				if (descriptor) Object.defineProperty(view, key, descriptor);
+				else Reflect.deleteProperty(view, key);
+			});
 		};
 	}
 
@@ -220,7 +217,7 @@ export class LiveSession implements TransportEvents {
 		const api = this.api;
 		if (!api || !this.transport || !this.view) return;
 		if (this.view.file?.path !== this.filePath) {
-			this.end("во вкладке открыт другой рисунок");
+			this.end("endOtherDrawing");
 			return;
 		}
 
@@ -254,7 +251,7 @@ export class LiveSession implements TransportEvents {
 	 * without any pointer event, so the cursor's scene position changes silently.
 	 * Re-project the last pointer through the new viewport so peers see it move.
 	 */
-	private onLocalViewport(appState: unknown): void {
+	private onLocalViewport(appState: AppStateLike | undefined): void {
 		const last = this.lastPointer;
 		const viewport = viewportOf(appState);
 		if (!this.transport || !last || !viewport) return;
@@ -312,7 +309,9 @@ export class LiveSession implements TransportEvents {
 		// Never yank an element out from under the local user mid-edit; their
 		// next change will carry a higher version and win anyway.
 		const busy = new Set<string>(
-			[appState.editingTextElement?.id, appState.editingElement?.id, appState.newElement?.id].filter(Boolean),
+			[appState.editingTextElement?.id, appState.editingElement?.id, appState.newElement?.id].filter(
+				(id): id is string => !!id,
+			),
 		);
 
 		const local = api.getSceneElementsIncludingDeleted();
@@ -376,19 +375,22 @@ export class LiveSession implements TransportEvents {
 
 	private requireApi(): ExcalidrawAPI {
 		const api = this.api;
-		if (!api) throw new Error("Excalidraw API недоступен");
+		if (!api) throw new Error(t("noApi"));
 		return api;
 	}
 }
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-function viewportOf(appState: any): Viewport | null {
+function viewportOf(appState: AppStateLike | undefined): Viewport | null {
 	const zoom = typeof appState?.zoom === "number" ? appState.zoom : appState?.zoom?.value;
-	const { scrollX, scrollY } = appState ?? {};
-	if (![zoom, scrollX, scrollY].every((n) => typeof n === "number" && Number.isFinite(n)) || zoom <= 0) return null;
+	const scrollX = appState?.scrollX;
+	const scrollY = appState?.scrollY;
+	if (!isFiniteNumber(zoom) || !isFiniteNumber(scrollX) || !isFiniteNumber(scrollY) || zoom <= 0) return null;
 	return { scrollX, scrollY, zoom };
 }
-/* eslint-enable @typescript-eslint/no-explicit-any */
+
+function isFiniteNumber(n: unknown): n is number {
+	return typeof n === "number" && Number.isFinite(n);
+}
 
 function remoteWins(local: SceneElement, remote: SceneElement): boolean {
 	if (remote.version !== local.version) return remote.version > local.version;

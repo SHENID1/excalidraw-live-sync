@@ -10,6 +10,7 @@ import {
 	proofMatches,
 	sessionCiphers,
 } from "./crypto";
+import { t } from "./i18n";
 import { BinaryFile, HOST_ID, Message, PeerInfo, PROTOCOL_VERSION, RELAYED, SceneElement } from "./protocol";
 
 const MAX_BUFFER = 256 * 1024 * 1024; // a single message may carry embedded images
@@ -65,7 +66,7 @@ class PeerSocket {
 		sock.setKeepAlive(true, 10_000);
 		sock.on("data", (chunk: Buffer) => this.onData(chunk));
 		sock.on("error", (err) => this.close(err.message));
-		sock.on("close", () => this.close("соединение закрыто"));
+		sock.on("close", () => this.close("netClosed"));
 	}
 
 	get remote(): string {
@@ -86,7 +87,7 @@ class PeerSocket {
 		this.lastSeen = Date.now();
 		// Pings only start now: a ping line racing the switch would corrupt the stream.
 		this.pingTimer = window.setInterval(() => {
-			if (Date.now() - this.lastSeen > DEAD_AFTER) this.close("таймаут соединения");
+			if (Date.now() - this.lastSeen > DEAD_AFTER) this.close("netTimeout");
 			else this.send({ t: "ping" }, true);
 		}, PING_INTERVAL);
 	}
@@ -137,7 +138,7 @@ class PeerSocket {
 					break;
 				}
 				const len = buf.readUInt32BE(pos);
-				if (len > MAX_BUFFER) return this.close("слишком большое сообщение");
+				if (len > MAX_BUFFER) return this.close("netTooLarge");
 				if (buf.length - pos < 4 + len) {
 					this.need = 4 + len;
 					break;
@@ -147,7 +148,7 @@ class PeerSocket {
 			} else {
 				const nl = buf.indexOf(0x0a, pos);
 				if (nl < 0) {
-					if (buf.length - pos > MAX_LINE) return this.close("протокол нарушен");
+					if (buf.length - pos > MAX_LINE) return this.close("netProtocol");
 					break;
 				}
 				body = buf.subarray(pos, nl);
@@ -158,10 +159,10 @@ class PeerSocket {
 			let msg: Message;
 			try {
 				const plain = this.framed && this.ciphers ? this.ciphers.recv.open(body) : body;
-				msg = JSON.parse(plain.toString("utf8"));
+				msg = JSON.parse(plain.toString("utf8")) as Message;
 			} catch {
 				// A frame that fails authentication means tampering or a desynced stream; nothing after it can be trusted.
-				if (this.framed && this.ciphers) return this.close("не удалось расшифровать сообщение");
+				if (this.framed && this.ciphers) return this.close("netDecrypt");
 				console.warn("[excalidraw-live] malformed message from", this.remote);
 				continue;
 			}
@@ -209,7 +210,7 @@ export class LiveHost implements Transport {
 		return new Promise((resolve, reject) => {
 			const server = net.createServer();
 			const onError = (err: NodeJS.ErrnoException) => {
-				reject(new Error(err.code === "EADDRINUSE" ? `порт ${opts.port} уже занят` : err.message));
+				reject(new Error(err.code === "EADDRINUSE" ? t("netPortInUse", { port: opts.port }) : err.message));
 			};
 			server.once("error", onError);
 			// Bind on all interfaces so LAN, Radmin VPN, Hamachi etc. all reach us.
@@ -221,12 +222,6 @@ export class LiveHost implements Transport {
 		});
 	}
 
-	get peerCount(): number {
-		let n = 0;
-		for (const c of this.clients) if (c.peer) n++;
-		return n;
-	}
-
 	send(msg: Message): void {
 		const out = { ...msg, from: HOST_ID } as Message;
 		for (const c of this.clients) if (c.peer) c.ls.send(out, out.t === "pointer");
@@ -234,7 +229,7 @@ export class LiveHost implements Transport {
 
 	close(): void {
 		this.server.close();
-		for (const c of [...this.clients]) c.ls.finish({ t: "reject", reason: "хост завершил сессию" });
+		for (const c of [...this.clients]) c.ls.finish({ t: "reject", reason: "rejectEnded" });
 		this.clients.clear();
 	}
 
@@ -247,7 +242,7 @@ export class LiveHost implements Transport {
 		);
 		this.clients.add(client);
 		window.setTimeout(() => {
-			if (!client.peer) client.ls.close("нет приветствия");
+			if (!client.peer) client.ls.close("netNoHello");
 		}, HANDSHAKE_TIMEOUT);
 	}
 
@@ -273,7 +268,7 @@ export class LiveHost implements Transport {
 		const key = this.opts.key;
 
 		if (client.stage === "hello" && msg.t === "hello") {
-			if (msg.proto !== PROTOCOL_VERSION) return reject("несовместимая версия плагина — обновите его у всех");
+			if (msg.proto !== PROTOCOL_VERSION) return reject("rejectVersion");
 			if (!key) {
 				client.ls.send({ t: "open" });
 				client.ls.upgrade(null);
@@ -288,7 +283,7 @@ export class LiveHost implements Transport {
 
 		if (client.stage === "auth" && msg.t === "auth" && key && typeof msg.nonce === "string") {
 			if (!proofMatches(makeProof(key, "client", client.hostNonce, msg.nonce), msg.proof)) {
-				return reject("неверный пароль");
+				return reject("rejectPassword");
 			}
 			client.ls.send({ t: "auth-ok", proof: makeProof(key, "host", client.hostNonce, msg.nonce) });
 			client.ls.upgrade(sessionCiphers(key, client.hostNonce, msg.nonce, "host"));
@@ -299,7 +294,7 @@ export class LiveHost implements Transport {
 		if (client.stage === "join" && msg.t === "join") {
 			const peer: PeerInfo = {
 				id: randomBytes(6).toString("hex"),
-				name: String(msg.name || "Гость").slice(0, 40),
+				name: String(msg.name || t("guestName")).slice(0, 40),
 				color: String(msg.color || "#888888"),
 			};
 			const others = [...this.clients].filter((c) => c.peer).map((c) => c.peer as PeerInfo);
@@ -311,7 +306,7 @@ export class LiveHost implements Transport {
 			return;
 		}
 
-		client.ls.close("протокол нарушен");
+		client.ls.close("netProtocol");
 	}
 
 	private onClientClosed(client: HostClient, _reason: string): void {
@@ -362,7 +357,7 @@ export class LiveClient implements Transport {
 			let hostNonce = "";
 			let clientNonce = "";
 			const sock = net.connect({ host: address.host, port: address.port });
-			const timer = window.setTimeout(() => ls.close("хост не отвечает"), HANDSHAKE_TIMEOUT);
+			const timer = window.setTimeout(() => ls.close("netHostTimeout"), HANDSHAKE_TIMEOUT);
 
 			const join = () => {
 				stage = "join";
@@ -372,7 +367,7 @@ export class LiveClient implements Transport {
 				try {
 					if (auth.password) key = await derivePasswordKey(auth.password, challenge.salt);
 					else if (auth.saved?.salt === challenge.salt) key = auth.saved;
-					else return ls.close(auth.saved ? "хост сменил пароль — введи новый" : "хост требует пароль");
+					else return ls.close(auth.saved ? "netPasswordChanged" : "netPasswordRequired");
 					hostNonce = challenge.nonce;
 					clientNonce = makeNonce();
 					ls.send({ t: "auth", nonce: clientNonce, proof: makeProof(key, "client", hostNonce, clientNonce) });
@@ -389,7 +384,7 @@ export class LiveClient implements Transport {
 						ls.close(msg.reason);
 					} else if (stage === "hello" && msg.t === "open") {
 						// Refuse rather than silently fall back to plaintext when we expected a password.
-						if (auth.password) return ls.close("у хоста не задан пароль — оставь поле пароля пустым");
+						if (auth.password) return ls.close("netNoHostPassword");
 						ls.upgrade(null);
 						join();
 					} else if (stage === "hello" && msg.t === "challenge" && typeof msg.salt === "string") {
@@ -397,7 +392,7 @@ export class LiveClient implements Transport {
 						void answer(msg);
 					} else if (stage === "auth" && msg.t === "auth-ok" && key) {
 						if (!proofMatches(makeProof(key, "host", hostNonce, clientNonce), msg.proof)) {
-							return ls.close("хост не подтвердил пароль");
+							return ls.close("netHostUnverified");
 						}
 						ls.upgrade(sessionCiphers(key, hostNonce, clientNonce, "client"));
 						join();
@@ -406,7 +401,7 @@ export class LiveClient implements Transport {
 						client = new LiveClient(ls, msg.id);
 						resolve({ client, welcome: msg, key });
 					} else {
-						ls.close("протокол нарушен");
+						ls.close("netProtocol");
 					}
 				},
 				(reason) => {
@@ -430,7 +425,7 @@ export class LiveClient implements Transport {
 	}
 
 	close(): void {
-		this.ls.close("отключено");
+		this.ls.close("netDisconnected");
 	}
 }
 
@@ -476,6 +471,6 @@ function describeInterface(name: string, ip: string): string {
 	if (n.includes("hamachi") || ip.startsWith("25.")) return `Hamachi (${name})`;
 	if (n.includes("zerotier")) return `ZeroTier (${name})`;
 	if (n.includes("tailscale") || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) return `Tailscale (${name})`;
-	if (/^(192\.168|10\.|172\.(1[6-9]|2\d|3[01]))\./.test(ip)) return `Локальная сеть (${name})`;
+	if (/^(192\.168|10\.|172\.(1[6-9]|2\d|3[01]))\./.test(ip)) return t("lanLabel", { name });
 	return name;
 }
