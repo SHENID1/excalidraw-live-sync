@@ -5,6 +5,14 @@ import { BinaryFile, Message, PeerInfo, PointerState, SceneElement } from "./pro
 const FLUSH_INTERVAL = 50;
 const POINTER_INTERVAL = 40;
 
+type PointerPayload = Parameters<ExcalidrawViewLike["onPointerUpdate"]>[0];
+
+interface Viewport {
+	scrollX: number;
+	scrollY: number;
+	zoom: number;
+}
+
 export type Role = "host" | "client";
 export type JoinMode = "new" | "replace" | "merge";
 
@@ -38,7 +46,9 @@ export class LiveSession implements TransportEvents {
 	private flushTimer: number | null = null;
 	private pointerTimer: number | null = null;
 	private lastPointerSent = 0;
-	private pendingPointer: Parameters<ExcalidrawViewLike["onPointerUpdate"]>[0] | null = null;
+	private pendingPointer: PointerPayload | null = null;
+	/** Last local pointer and the viewport it was measured in, so panning/zooming can move it too. */
+	private lastPointer: { payload: PointerPayload; viewport: Viewport } | null = null;
 	private collabFrame: number | null = null;
 	private ended = false;
 
@@ -70,6 +80,7 @@ export class LiveSession implements TransportEvents {
 		view.onChange = function (...args) {
 			origChange.apply(this, args);
 			session.scheduleFlush();
+			session.onLocalViewport(args[1]);
 		};
 		view.onPointerUpdate = function (payload) {
 			origPointer.call(this, payload);
@@ -231,8 +242,38 @@ export class LiveSession implements TransportEvents {
 		if (changed.length) this.transport.send({ t: "elements", elements: changed });
 	}
 
-	private onLocalPointer(payload: Parameters<ExcalidrawViewLike["onPointerUpdate"]>[0]): void {
+	private onLocalPointer(payload: PointerPayload): void {
 		if (!this.transport || !payload?.pointer) return;
+		const viewport = viewportOf(this.api?.getAppState());
+		this.lastPointer = viewport && { payload, viewport };
+		this.queuePointer(payload);
+	}
+
+	/**
+	 * Wheel/pinch zoom and trackpad panning move the canvas under a still mouse
+	 * without any pointer event, so the cursor's scene position changes silently.
+	 * Re-project the last pointer through the new viewport so peers see it move.
+	 */
+	private onLocalViewport(appState: unknown): void {
+		const last = this.lastPointer;
+		const viewport = viewportOf(appState);
+		if (!this.transport || !last || !viewport) return;
+		const prev = last.viewport;
+		if (viewport.scrollX === prev.scrollX && viewport.scrollY === prev.scrollY && viewport.zoom === prev.zoom) return;
+		const { x, y } = last.payload.pointer;
+		const payload: PointerPayload = {
+			...last.payload,
+			pointer: {
+				...last.payload.pointer,
+				x: ((x + prev.scrollX) * prev.zoom) / viewport.zoom - viewport.scrollX,
+				y: ((y + prev.scrollY) * prev.zoom) / viewport.zoom - viewport.scrollY,
+			},
+		};
+		this.lastPointer = { payload, viewport };
+		this.queuePointer(payload);
+	}
+
+	private queuePointer(payload: PointerPayload): void {
 		this.pendingPointer = payload;
 		if (this.pointerTimer !== null) return;
 		const wait = Math.max(0, POINTER_INTERVAL - (Date.now() - this.lastPointerSent));
@@ -339,6 +380,15 @@ export class LiveSession implements TransportEvents {
 		return api;
 	}
 }
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+function viewportOf(appState: any): Viewport | null {
+	const zoom = typeof appState?.zoom === "number" ? appState.zoom : appState?.zoom?.value;
+	const { scrollX, scrollY } = appState ?? {};
+	if (![zoom, scrollX, scrollY].every((n) => typeof n === "number" && Number.isFinite(n)) || zoom <= 0) return null;
+	return { scrollX, scrollY, zoom };
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
 function remoteWins(local: SceneElement, remote: SceneElement): boolean {
 	if (remote.version !== local.version) return remote.version > local.version;
