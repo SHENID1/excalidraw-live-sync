@@ -14,14 +14,35 @@ Live-режим для плагина [Excalidraw](https://github.com/zsviczian/
 
 ## Установка
 
+Ставить нужно всем участникам, версии этого плагина должны совпадать. Плагин Excalidraw должен быть включён.
+
+**Через BRAT (рекомендуется — обновления приходят сами)**
+1. *Настройки → Сторонние плагины → Обзор* → найти и установить **BRAT**, включить.
+2. *BRAT → Add Beta plugin* → ввести `SHENID1/excalidraw-live-sync`.
+3. Включить **Excalidraw Live Sync** в списке сторонних плагинов.
+
+**Вручную**
+Скачать `main.js`, `manifest.json`, `styles.css` из [последнего релиза](https://github.com/SHENID1/excalidraw-live-sync/releases/latest)
+в папку `<хранилище>/.obsidian/plugins/excalidraw-live-sync/`, затем включить плагин.
+
+**Из исходников**
+
 ```bash
 npm install
 npm run build
 npm run install-plugin -- "C:/путь/к/хранилищу"
 ```
 
-Потом в Obsidian: *Настройки → Сторонние плагины* → включить **Excalidraw Live Sync**.
-Плагин Excalidraw должен быть включён. Ставить нужно всем участникам, версии этого плагина должны совпадать.
+## Выпуск новой версии
+
+Поднять `version` в `manifest.json` и `package.json`, закоммитить и запушить тег с тем же номером:
+
+```bash
+git tag 0.2.1
+git push origin 0.2.1
+```
+
+GitHub Action соберёт плагин и выложит релиз с `main.js`, `manifest.json`, `styles.css`.
 
 ## Как пользоваться
 
