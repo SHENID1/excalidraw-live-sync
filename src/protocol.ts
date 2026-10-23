@@ -1,8 +1,15 @@
-// Wire protocol: newline-delimited JSON over a plain TCP socket.
-// Topology is a star: one peer hosts, everyone else connects to it and the
-// host relays messages between clients.
+// Wire protocol over a plain TCP socket. Topology is a star: one peer hosts,
+// everyone else connects to it and the host relays messages between clients.
+//
+// The handshake is newline-delimited JSON, so peers on another protocol
+// version still read each other's reject:
+//   client: hello            host: open | challenge
+//   client: auth             host: auth-ok | reject       (password set)
+// From the line after `open` / `auth-ok` on, both directions switch to
+// length-prefixed frames, AES-GCM sealed when a password is set, starting
+// with the client's `join` and the host's `welcome`.
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const HOST_ID = "host";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -40,7 +47,12 @@ export interface PointerState {
 }
 
 export type Message =
-	| { t: "hello"; proto: number; name: string; color: string; password: string }
+	| { t: "hello"; proto: number }
+	| { t: "open" }
+	| { t: "challenge"; salt: string; nonce: string }
+	| { t: "auth"; nonce: string; proof: string }
+	| { t: "auth-ok"; proof: string }
+	| { t: "join"; name: string; color: string }
 	| { t: "welcome"; id: string; peers: PeerInfo[]; drawing: string; elements: SceneElement[]; files: BinaryFile[] }
 	| { t: "reject"; reason: string }
 	| { t: "peer-join"; peer: PeerInfo }

@@ -6,7 +6,8 @@ import {
 	isViewOpen,
 	waitForViewReady,
 } from "./excalidraw";
-import { LiveClient, LiveHost, parseAddress } from "./net";
+import { derivePasswordKey } from "./crypto";
+import { Connected, LiveClient, LiveHost, parseAddress } from "./net";
 import { HOST_ID, PeerInfo } from "./protocol";
 import { LiveSession, SessionCallbacks } from "./session";
 import { DEFAULT_SETTINGS, LiveSettings, LiveSettingTab } from "./settings";
@@ -75,7 +76,17 @@ export default class ExcalidrawLivePlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const data = (await this.loadData()) ?? {};
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, data, { joinKeys: { ...data.joinKeys } });
+
+		// Up to 0.1 passwords were stored as typed; keep only the host one, as its scrypt key.
+		if ("password" in data || "joinPassword" in data) {
+			const legacy = this.settings as LiveSettings & { password?: string; joinPassword?: string };
+			if (legacy.password) legacy.hostKey = await derivePasswordKey(legacy.password);
+			delete legacy.password;
+			delete legacy.joinPassword;
+			await this.saveSettings();
+		}
 	}
 
 	async saveSettings(): Promise<void> {
@@ -128,7 +139,7 @@ export default class ExcalidrawLivePlugin extends Plugin {
 			const host = await LiveHost.start(
 				{
 					port: this.settings.port,
-					password: this.settings.password,
+					key: this.settings.hostKey,
 					self: { id: HOST_ID, ...this.self },
 					getSnapshot: () => s.snapshot(),
 				},
@@ -149,19 +160,23 @@ export default class ExcalidrawLivePlugin extends Plugin {
 
 	private openJoin(): void {
 		if (!this.ensureIdle()) return;
-		const { lastAddress, password, joinMode } = this.settings;
+		const { name, lastAddress, joinMode } = this.settings;
 		new JoinModal(
 			this.app,
-			{ address: lastAddress, password, mode: joinMode },
+			{ name, address: lastAddress, password: "", mode: joinMode },
 			!!getActiveExcalidrawView(this.app),
+			(address) => {
+				const addr = parseAddress(address, this.settings.port);
+				return !!addr && !!this.settings.joinKeys[addressKey(addr)];
+			},
 			(req) => void this.join(req),
 		).open();
 	}
 
 	async join(req: JoinRequest): Promise<void> {
 		if (!this.ensureIdle()) return;
+		this.settings.name = req.name.trim() || this.settings.name;
 		this.settings.lastAddress = req.address.trim();
-		this.settings.password = req.password;
 		this.settings.joinMode = req.mode;
 		await this.saveSettings();
 
@@ -180,11 +195,11 @@ export default class ExcalidrawLivePlugin extends Plugin {
 		let session: LiveSession | null = null;
 		const s = (session = new LiveSession("client", this.callbacksFor(() => session)));
 		const connecting = new Notice(`Подключаюсь к ${addr.host}:${addr.port}…`, 0);
-		let welcome;
+		const savedKey = this.settings.joinKeys[addressKey(addr)] ?? null;
+		let res: Connected;
 		try {
-			const res = await LiveClient.connect(addr, { ...this.self, password: req.password }, s);
+			res = await LiveClient.connect(addr, this.self, { password: req.password, saved: savedKey }, s);
 			s.transport = res.client;
-			welcome = res.welcome;
 		} catch (e) {
 			connecting.hide();
 			new Notice(`Не удалось подключиться: ${errorText(e)}`);
@@ -192,6 +207,10 @@ export default class ExcalidrawLivePlugin extends Plugin {
 		}
 		connecting.hide();
 		this.session = s;
+		const { welcome } = res;
+		if (res.key) this.settings.joinKeys[addressKey(addr)] = res.key;
+		else delete this.settings.joinKeys[addressKey(addr)];
+		void this.saveSettings();
 		this.hostLabel = welcome.peers.find((p) => p.id === HOST_ID)?.name ?? `${addr.host}`;
 		this.refreshStatus();
 
@@ -205,14 +224,15 @@ export default class ExcalidrawLivePlugin extends Plugin {
 			if (this.session !== s) return; // disconnected while the drawing was opening
 			s.attach(view);
 			s.applyWelcome(welcome, req.mode);
-			new Notice(`Подключено к «${welcome.drawing || this.hostLabel}» (${this.hostLabel})`);
+			const lock = res.client.encrypted ? ", зашифровано" : "";
+			new Notice(`Подключено к «${welcome.drawing || this.hostLabel}» (${this.hostLabel}${lock})`);
 		} catch (e) {
 			s.end(errorText(e));
 		}
 	}
 
 	private showHostInfo(): void {
-		new HostInfoModal(this.app, this.settings.port, !!this.settings.password).open();
+		new HostInfoModal(this.app, this.settings.port, !!this.settings.hostKey).open();
 	}
 
 	private showMenu(evt: MouseEvent): void {
@@ -263,6 +283,10 @@ export default class ExcalidrawLivePlugin extends Plugin {
 
 function errorText(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);
+}
+
+function addressKey(addr: { host: string; port: number }): string {
+	return `${addr.host}:${addr.port}`;
 }
 
 function sanitizeFileName(name: string): string {

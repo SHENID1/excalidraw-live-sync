@@ -1,5 +1,6 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import * as os from "os";
+import { derivePasswordKey, PasswordKey } from "./crypto";
 import type ExcalidrawLivePlugin from "./main";
 import type { JoinMode } from "./session";
 
@@ -7,9 +8,12 @@ export interface LiveSettings {
 	name: string;
 	color: string;
 	port: number;
-	password: string;
+	/** Our host password, stored only as its scrypt key; null means no password. */
+	hostKey: PasswordKey | null;
 	folder: string;
 	lastAddress: string;
+	/** Keys that got us into other hosts, by "host:port", so the password needn't be retyped. */
+	joinKeys: Record<string, PasswordKey>;
 	joinMode: JoinMode;
 }
 
@@ -19,9 +23,10 @@ export const DEFAULT_SETTINGS: LiveSettings = {
 	name: safeUsername(),
 	color: PALETTE[Math.floor(Math.random() * PALETTE.length)],
 	port: 47321,
-	password: "",
+	hostKey: null,
 	folder: "Excalidraw Live",
 	lastAddress: "",
+	joinKeys: {},
 	joinMode: "new",
 };
 
@@ -76,16 +81,45 @@ export class LiveSettingTab extends PluginSettingTab {
 				}),
 			);
 
+		let newPassword = "";
+		const setPassword = async () => {
+			if (!newPassword) {
+				new Notice("Введи пароль");
+				return;
+			}
+			s.hostKey = await derivePasswordKey(newPassword);
+			await this.plugin.saveSettings();
+			new Notice("Пароль сессии задан");
+			this.display();
+		};
 		new Setting(containerEl)
-			.setName("Пароль сессии")
-			.setDesc("Необязательно. Хост пускает только тех, у кого пароль совпадает. Передаётся без шифрования.")
+			.setName("Пароль сессии (когда ты хост)")
+			.setDesc(
+				s.hostKey
+					? "Задан. Хранится только хэш (scrypt), сам пароль не показать — можно задать новый или убрать. " +
+							"Пароль по сети не передаётся, весь трафик шифруется."
+					: "Не задан — подключиться может любой в сети, трафик не шифруется. " +
+							"С паролем участники входят только по нему, а весь трафик шифруется.",
+			)
 			.addText((t) => {
 				t.inputEl.type = "password";
-				t.setValue(s.password).onChange(async (v) => {
-					s.password = v;
-					await this.plugin.saveSettings();
+				t.setPlaceholder(s.hostKey ? "Новый пароль" : "Пароль").onChange((v) => (newPassword = v));
+				t.inputEl.addEventListener("keydown", (e) => {
+					if (e.key === "Enter") void setPassword();
 				});
-			});
+			})
+			.addButton((b) => b.setButtonText("Задать").onClick(() => void setPassword()))
+			.addButton((b) =>
+				b
+					.setButtonText("Убрать")
+					.setDisabled(!s.hostKey)
+					.onClick(async () => {
+						s.hostKey = null;
+						await this.plugin.saveSettings();
+						new Notice("Пароль сессии убран");
+						this.display();
+					}),
+			);
 
 		new Setting(containerEl)
 			.setName("Папка для новых рисунков")

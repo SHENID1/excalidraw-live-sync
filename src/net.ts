@@ -1,14 +1,25 @@
 import * as net from "net";
 import * as os from "os";
 import { randomBytes } from "crypto";
+import {
+	CipherPair,
+	derivePasswordKey,
+	makeNonce,
+	makeProof,
+	PasswordKey,
+	proofMatches,
+	sessionCiphers,
+} from "./crypto";
 import { BinaryFile, HOST_ID, Message, PeerInfo, PROTOCOL_VERSION, RELAYED, SceneElement } from "./protocol";
 
-const MAX_BUFFER = 256 * 1024 * 1024; // a single line may carry embedded images
+const MAX_BUFFER = 256 * 1024 * 1024; // a single message may carry embedded images
+const MAX_LINE = 64 * 1024; // handshake lines are tiny
 const PING_INTERVAL = 5_000;
 const DEAD_AFTER = 25_000;
 const HANDSHAKE_TIMEOUT = 10_000;
 /** Pointer updates are dropped instead of queued once this much is waiting to be written. */
 const VOLATILE_BACKLOG = 512 * 1024;
+const NEWLINE = Buffer.from("\n");
 
 export interface TransportEvents {
 	onMessage(msg: Message): void;
@@ -29,11 +40,20 @@ export interface Snapshot {
 	files: BinaryFile[];
 }
 
-/** Newline-delimited JSON framing plus keepalive on top of a TCP socket. */
-class LineSocket {
-	private buf = "";
+/**
+ * Message framing plus keepalive on top of a TCP socket. Starts out reading and
+ * writing JSON lines for the handshake; `upgrade()` switches both directions to
+ * length-prefixed frames, sealed with AES-GCM when given ciphers.
+ */
+class PeerSocket {
+	private parts: Buffer[] = [];
+	private size = 0;
+	/** Bytes needed before the next message can be parsed; avoids re-joining a large frame on every chunk. */
+	private need = 0;
+	private framed = false;
+	private ciphers: CipherPair | null = null;
 	private lastSeen = Date.now();
-	private pingTimer: number;
+	private pingTimer: number | null = null;
 	private closed = false;
 
 	constructor(
@@ -41,26 +61,48 @@ class LineSocket {
 		private onMessage: (msg: Message) => void,
 		private onClose: (reason: string) => void,
 	) {
-		sock.setEncoding("utf8");
 		sock.setNoDelay(true);
 		sock.setKeepAlive(true, 10_000);
-		sock.on("data", (chunk: string) => this.onData(chunk));
+		sock.on("data", (chunk: Buffer) => this.onData(chunk));
 		sock.on("error", (err) => this.close(err.message));
 		sock.on("close", () => this.close("соединение закрыто"));
-		this.pingTimer = window.setInterval(() => {
-			if (Date.now() - this.lastSeen > DEAD_AFTER) this.close("таймаут соединения");
-			else this.send({ t: "ping" }, true);
-		}, PING_INTERVAL);
 	}
 
 	get remote(): string {
 		return `${this.sock.remoteAddress ?? "?"}:${this.sock.remotePort ?? "?"}`;
 	}
 
+	get encrypted(): boolean {
+		return !!this.ciphers;
+	}
+
+	/**
+	 * Switches to frames. Must run synchronously right after the last handshake
+	 * line is sent and read on this side, so no line and frame ever interleave.
+	 */
+	upgrade(ciphers: CipherPair | null): void {
+		this.framed = true;
+		this.ciphers = ciphers;
+		this.lastSeen = Date.now();
+		// Pings only start now: a ping line racing the switch would corrupt the stream.
+		this.pingTimer = window.setInterval(() => {
+			if (Date.now() - this.lastSeen > DEAD_AFTER) this.close("таймаут соединения");
+			else this.send({ t: "ping" }, true);
+		}, PING_INTERVAL);
+	}
+
 	send(msg: Message, volatile = false): void {
 		if (this.closed || !this.sock.writable) return;
 		if (volatile && this.sock.writableLength > VOLATILE_BACKLOG) return;
-		this.sock.write(JSON.stringify(msg) + "\n");
+		const json = Buffer.from(JSON.stringify(msg), "utf8");
+		if (!this.framed) {
+			this.sock.write(Buffer.concat([json, NEWLINE]));
+			return;
+		}
+		const body = this.ciphers ? this.ciphers.send.seal(json) : json;
+		const head = Buffer.alloc(4);
+		head.writeUInt32BE(body.length);
+		this.sock.write(Buffer.concat([head, body]));
 	}
 
 	/** Sends a final message and half-closes, letting it flush before the socket goes away. */
@@ -73,44 +115,79 @@ class LineSocket {
 	close(reason: string): void {
 		if (this.closed) return;
 		this.closed = true;
-		window.clearInterval(this.pingTimer);
+		if (this.pingTimer !== null) window.clearInterval(this.pingTimer);
 		this.sock.destroy();
 		this.onClose(reason);
 	}
 
-	private onData(chunk: string): void {
+	private onData(chunk: Buffer): void {
 		this.lastSeen = Date.now();
-		this.buf += chunk;
-		if (this.buf.length > MAX_BUFFER) {
-			this.close("слишком большое сообщение");
-			return;
-		}
-		let nl: number;
-		while (!this.closed && (nl = this.buf.indexOf("\n")) >= 0) {
-			const line = this.buf.slice(0, nl);
-			this.buf = this.buf.slice(nl + 1);
-			if (!line.trim()) continue;
+		this.parts.push(chunk);
+		this.size += chunk.length;
+		if (this.size < this.need) return;
+
+		let buf = this.parts.length === 1 ? this.parts[0] : Buffer.concat(this.parts, this.size);
+		let pos = 0;
+		this.need = 0;
+		while (!this.closed) {
+			let body: Buffer;
+			if (this.framed) {
+				if (buf.length - pos < 4) {
+					this.need = 4;
+					break;
+				}
+				const len = buf.readUInt32BE(pos);
+				if (len > MAX_BUFFER) return this.close("слишком большое сообщение");
+				if (buf.length - pos < 4 + len) {
+					this.need = 4 + len;
+					break;
+				}
+				body = buf.subarray(pos + 4, pos + 4 + len);
+				pos += 4 + len;
+			} else {
+				const nl = buf.indexOf(0x0a, pos);
+				if (nl < 0) {
+					if (buf.length - pos > MAX_LINE) return this.close("протокол нарушен");
+					break;
+				}
+				body = buf.subarray(pos, nl);
+				pos = nl + 1;
+				if (!body.length) continue;
+			}
+
 			let msg: Message;
 			try {
-				msg = JSON.parse(line);
+				const plain = this.framed && this.ciphers ? this.ciphers.recv.open(body) : body;
+				msg = JSON.parse(plain.toString("utf8"));
 			} catch {
+				// A frame that fails authentication means tampering or a desynced stream; nothing after it can be trusted.
+				if (this.framed && this.ciphers) return this.close("не удалось расшифровать сообщение");
 				console.warn("[excalidraw-live] malformed message from", this.remote);
 				continue;
 			}
 			if (msg.t === "ping") this.send({ t: "pong" }, true);
 			else if (msg.t !== "pong") this.onMessage(msg);
 		}
+
+		buf = buf.subarray(pos);
+		this.parts = buf.length ? [buf] : [];
+		this.size = buf.length;
 	}
 }
 
+type HandshakeStage = "hello" | "auth" | "join";
+
 interface HostClient {
-	ls: LineSocket;
+	ls: PeerSocket;
 	peer: PeerInfo | null;
+	stage: HandshakeStage;
+	hostNonce: string;
 }
 
 export interface HostOptions {
 	port: number;
-	password: string;
+	/** Peers must prove they know the password behind this key; null lets anyone in, unencrypted. */
+	key: PasswordKey | null;
 	self: PeerInfo;
 	getSnapshot(): Snapshot;
 }
@@ -162,8 +239,8 @@ export class LiveHost implements Transport {
 	}
 
 	private accept(sock: net.Socket): void {
-		const client: HostClient = { ls: null as unknown as LineSocket, peer: null };
-		client.ls = new LineSocket(
+		const client: HostClient = { ls: null as unknown as PeerSocket, peer: null, stage: "hello", hostNonce: "" };
+		client.ls = new PeerSocket(
 			sock,
 			(msg) => this.onClientMessage(client, msg),
 			(reason) => this.onClientClosed(client, reason),
@@ -175,11 +252,7 @@ export class LiveHost implements Transport {
 	}
 
 	private onClientMessage(client: HostClient, msg: Message): void {
-		if (!client.peer) {
-			if (msg.t === "hello") this.handshake(client, msg);
-			else client.ls.close("протокол нарушен");
-			return;
-		}
+		if (!client.peer) return this.handshake(client, msg);
 		const from = client.peer.id;
 		if (msg.t === "sync-request") {
 			const snap = this.opts.getSnapshot();
@@ -195,22 +268,50 @@ export class LiveHost implements Transport {
 		this.events.onMessage(out);
 	}
 
-	private handshake(client: HostClient, hello: Extract<Message, { t: "hello" }>): void {
+	private handshake(client: HostClient, msg: Message): void {
 		const reject = (reason: string) => client.ls.finish({ t: "reject", reason });
-		if (hello.proto !== PROTOCOL_VERSION) return reject("несовместимая версия плагина");
-		if (this.opts.password && hello.password !== this.opts.password) return reject("неверный пароль");
+		const key = this.opts.key;
 
-		const peer: PeerInfo = {
-			id: randomBytes(6).toString("hex"),
-			name: String(hello.name || "Гость").slice(0, 40),
-			color: String(hello.color || "#888888"),
-		};
-		const others = [...this.clients].filter((c) => c.peer).map((c) => c.peer as PeerInfo);
-		const snap = this.opts.getSnapshot();
-		client.peer = peer;
-		client.ls.send({ t: "welcome", id: peer.id, peers: [this.opts.self, ...others], ...snap });
-		for (const c of this.clients) if (c !== client && c.peer) c.ls.send({ t: "peer-join", peer });
-		this.events.onPeerJoin(peer);
+		if (client.stage === "hello" && msg.t === "hello") {
+			if (msg.proto !== PROTOCOL_VERSION) return reject("несовместимая версия плагина — обновите его у всех");
+			if (!key) {
+				client.ls.send({ t: "open" });
+				client.ls.upgrade(null);
+				client.stage = "join";
+				return;
+			}
+			client.hostNonce = makeNonce();
+			client.stage = "auth";
+			client.ls.send({ t: "challenge", salt: key.salt, nonce: client.hostNonce });
+			return;
+		}
+
+		if (client.stage === "auth" && msg.t === "auth" && key && typeof msg.nonce === "string") {
+			if (!proofMatches(makeProof(key, "client", client.hostNonce, msg.nonce), msg.proof)) {
+				return reject("неверный пароль");
+			}
+			client.ls.send({ t: "auth-ok", proof: makeProof(key, "host", client.hostNonce, msg.nonce) });
+			client.ls.upgrade(sessionCiphers(key, client.hostNonce, msg.nonce, "host"));
+			client.stage = "join";
+			return;
+		}
+
+		if (client.stage === "join" && msg.t === "join") {
+			const peer: PeerInfo = {
+				id: randomBytes(6).toString("hex"),
+				name: String(msg.name || "Гость").slice(0, 40),
+				color: String(msg.color || "#888888"),
+			};
+			const others = [...this.clients].filter((c) => c.peer).map((c) => c.peer as PeerInfo);
+			const snap = this.opts.getSnapshot();
+			client.peer = peer;
+			client.ls.send({ t: "welcome", id: peer.id, peers: [this.opts.self, ...others], ...snap });
+			for (const c of this.clients) if (c !== client && c.peer) c.ls.send({ t: "peer-join", peer });
+			this.events.onPeerJoin(peer);
+			return;
+		}
+
+		client.ls.close("протокол нарушен");
 	}
 
 	private onClientClosed(client: HostClient, _reason: string): void {
@@ -223,32 +324,89 @@ export class LiveHost implements Transport {
 
 export type Welcome = Extract<Message, { t: "welcome" }>;
 
+export interface ClientAuth {
+	/** Typed by the user; empty when none was entered. */
+	password: string;
+	/** Key remembered from an earlier successful join to this host. */
+	saved: PasswordKey | null;
+}
+
+export interface Connected {
+	client: LiveClient;
+	welcome: Welcome;
+	/** The key that got us in, worth remembering for next time; null when the host has no password. */
+	key: PasswordKey | null;
+}
+
 /** A peer connected to a host. */
 export class LiveClient implements Transport {
 	private constructor(
-		private ls: LineSocket,
+		private ls: PeerSocket,
 		readonly selfId: string,
 	) {}
 
+	get encrypted(): boolean {
+		return this.ls.encrypted;
+	}
+
 	static connect(
 		address: { host: string; port: number },
-		hello: { name: string; color: string; password: string },
+		self: { name: string; color: string },
+		auth: ClientAuth,
 		events: TransportEvents,
-	): Promise<{ client: LiveClient; welcome: Welcome }> {
+	): Promise<Connected> {
 		return new Promise((resolve, reject) => {
 			let client: LiveClient | null = null;
+			let stage: HandshakeStage = "hello";
+			let key: PasswordKey | null = null;
+			let hostNonce = "";
+			let clientNonce = "";
 			const sock = net.connect({ host: address.host, port: address.port });
 			const timer = window.setTimeout(() => ls.close("хост не отвечает"), HANDSHAKE_TIMEOUT);
-			const ls = new LineSocket(
+
+			const join = () => {
+				stage = "join";
+				ls.send({ t: "join", ...self });
+			};
+			const answer = async (challenge: Extract<Message, { t: "challenge" }>) => {
+				try {
+					if (auth.password) key = await derivePasswordKey(auth.password, challenge.salt);
+					else if (auth.saved?.salt === challenge.salt) key = auth.saved;
+					else return ls.close(auth.saved ? "хост сменил пароль — введи новый" : "хост требует пароль");
+					hostNonce = challenge.nonce;
+					clientNonce = makeNonce();
+					ls.send({ t: "auth", nonce: clientNonce, proof: makeProof(key, "client", hostNonce, clientNonce) });
+				} catch (e) {
+					ls.close(e instanceof Error ? e.message : String(e));
+				}
+			};
+
+			const ls = new PeerSocket(
 				sock,
 				(msg) => {
 					if (client) return dispatch(msg);
-					if (msg.t === "welcome") {
+					if (msg.t === "reject") {
+						ls.close(msg.reason);
+					} else if (stage === "hello" && msg.t === "open") {
+						// Refuse rather than silently fall back to plaintext when we expected a password.
+						if (auth.password) return ls.close("у хоста не задан пароль — оставь поле пароля пустым");
+						ls.upgrade(null);
+						join();
+					} else if (stage === "hello" && msg.t === "challenge" && typeof msg.salt === "string") {
+						stage = "auth";
+						void answer(msg);
+					} else if (stage === "auth" && msg.t === "auth-ok" && key) {
+						if (!proofMatches(makeProof(key, "host", hostNonce, clientNonce), msg.proof)) {
+							return ls.close("хост не подтвердил пароль");
+						}
+						ls.upgrade(sessionCiphers(key, hostNonce, clientNonce, "client"));
+						join();
+					} else if (stage === "join" && msg.t === "welcome") {
 						window.clearTimeout(timer);
 						client = new LiveClient(ls, msg.id);
-						resolve({ client, welcome: msg });
-					} else if (msg.t === "reject") {
-						ls.close(msg.reason);
+						resolve({ client, welcome: msg, key });
+					} else {
+						ls.close("протокол нарушен");
 					}
 				},
 				(reason) => {
@@ -263,7 +421,7 @@ export class LiveClient implements Transport {
 				else if (msg.t === "peer-leave") events.onPeerLeave(msg.id);
 				else events.onMessage(msg);
 			};
-			sock.once("connect", () => ls.send({ t: "hello", proto: PROTOCOL_VERSION, ...hello }));
+			sock.once("connect", () => ls.send({ t: "hello", proto: PROTOCOL_VERSION }));
 		});
 	}
 

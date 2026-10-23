@@ -38,7 +38,9 @@ export class HostInfoModal extends Modal {
 			cls: "excalidraw-live-hint",
 			text:
 				"Если Windows спросит про брандмауэр — разреши Obsidian доступ к частным сетям. " +
-				(this.hasPassword ? "Не забудь сообщить пароль." : "Пароль не задан — подключиться может любой в этой сети."),
+				(this.hasPassword
+					? "Не забудь сообщить пароль. Трафик сессии шифруется."
+					: "Пароль не задан — подключиться может любой в этой сети, трафик не шифруется."),
 		});
 	}
 
@@ -48,6 +50,7 @@ export class HostInfoModal extends Modal {
 }
 
 export interface JoinRequest {
+	name: string;
 	address: string;
 	password: string;
 	mode: JoinMode;
@@ -55,11 +58,13 @@ export interface JoinRequest {
 
 export class JoinModal extends Modal {
 	private req: JoinRequest;
+	private passwordSetting: Setting | null = null;
 
 	constructor(
 		app: App,
 		initial: JoinRequest,
 		private hasActiveDrawing: boolean,
+		private hasSavedKey: (address: string) => boolean,
 		private onSubmit: (req: JoinRequest) => void,
 	) {
 		super(app);
@@ -77,17 +82,26 @@ export class JoinModal extends Modal {
 			.setDesc("IP или IP:порт, например 26.15.3.7:47321")
 			.addText((t) => {
 				t.setPlaceholder("26.15.3.7:47321").setValue(this.req.address);
-				t.onChange((v) => (this.req.address = v));
+				t.onChange((v) => {
+					this.req.address = v;
+					this.describePassword();
+				});
 				t.inputEl.addEventListener("keydown", (e) => {
 					if (e.key === "Enter") this.submit();
 				});
 				window.setTimeout(() => t.inputEl.focus(), 0);
 			});
 
-		new Setting(contentEl).setName("Пароль").addText((t) => {
+		new Setting(contentEl)
+			.setName("Твоё имя")
+			.setDesc("Так тебя увидят другие участники рядом с курсором.")
+			.addText((t) => t.setValue(this.req.name).onChange((v) => (this.req.name = v)));
+
+		this.passwordSetting = new Setting(contentEl).setName("Пароль").addText((t) => {
 			t.inputEl.type = "password";
 			t.setValue(this.req.password).onChange((v) => (this.req.password = v));
 		});
+		this.describePassword();
 
 		new Setting(contentEl).setName("Куда").addDropdown((d) => {
 			d.addOption("new", "Новый рисунок");
@@ -99,6 +113,14 @@ export class JoinModal extends Modal {
 		});
 
 		new Setting(contentEl).addButton((b) => b.setButtonText("Подключиться").setCta().onClick(() => this.submit()));
+	}
+
+	private describePassword(): void {
+		this.passwordSetting?.setDesc(
+			this.hasSavedKey(this.req.address)
+				? "Для этого адреса уже сохранён — можно оставить пустым."
+				: "Только если хост его задал, иначе оставь пустым.",
+		);
 	}
 
 	private submit(): void {
